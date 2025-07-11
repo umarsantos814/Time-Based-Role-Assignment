@@ -5,6 +5,8 @@
 (define-constant ERR_INVALID_DURATION (err u103))
 (define-constant ERR_ALREADY_HAS_ROLE (err u104))
 (define-constant ERR_INVALID_ROLE (err u105))
+(define-constant ERR_CANNOT_TRANSFER_TO_SELF (err u106))
+(define-constant ERR_TRANSFER_NOT_ALLOWED (err u107))
 
 (define-constant ROLE_ADMIN u1)
 (define-constant ROLE_MODERATOR u2)
@@ -137,6 +139,30 @@
       (ok true)
     )
     ERR_ROLE_NOT_FOUND
+  )
+)
+
+(define-public (transfer-role (target-user principal) (role uint))
+  (let ((current-block stacks-block-height))
+    (match (map-get? user-roles { user: tx-sender, role: role })
+      role-data
+      (begin
+        (asserts! (not (is-eq tx-sender target-user)) ERR_CANNOT_TRANSFER_TO_SELF)
+        (asserts! (is-valid-role role) ERR_INVALID_ROLE)
+        (asserts! (>= (get expires-at role-data) current-block) ERR_ROLE_EXPIRED)
+        (asserts! (not (is-role-active target-user role)) ERR_ALREADY_HAS_ROLE)
+        (asserts! (or (is-eq tx-sender CONTRACT_OWNER) 
+                      (>= role ROLE_MEMBER)) ERR_TRANSFER_NOT_ALLOWED)
+        
+        (map-delete user-roles { user: tx-sender, role: role })
+        (map-set user-roles
+          { user: target-user, role: role }
+          { assigned-at: current-block, expires-at: (get expires-at role-data), assigned-by: tx-sender }
+        )
+        (ok true)
+      )
+      ERR_ROLE_NOT_FOUND
+    )
   )
 )
 
