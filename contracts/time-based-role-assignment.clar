@@ -7,6 +7,7 @@
 (define-constant ERR_INVALID_ROLE (err u105))
 (define-constant ERR_CANNOT_TRANSFER_TO_SELF (err u106))
 (define-constant ERR_TRANSFER_NOT_ALLOWED (err u107))
+(define-constant ERR_INVALID_HISTORY_LIMIT (err u108))
 
 (define-constant ROLE_ADMIN u1)
 (define-constant ROLE_MODERATOR u2)
@@ -15,6 +16,12 @@
 
 (define-constant MIN_DURATION u1)
 (define-constant MAX_DURATION u52560000)
+
+(define-constant ACTION_ASSIGNED "assigned")
+(define-constant ACTION_REVOKED "revoked")
+(define-constant ACTION_EXTENDED "extended")
+(define-constant ACTION_TRANSFERRED "transferred")
+(define-constant ACTION_EXPIRED "expired")
 
 (define-map user-roles
   { user: principal, role: uint }
@@ -27,6 +34,19 @@
 )
 
 (define-data-var total-active-roles uint u0)
+(define-data-var history-counter uint u0)
+
+(define-map role-history
+  uint
+  { 
+    user: principal, 
+    role: uint, 
+    action: (string-ascii 15), 
+    performed-by: principal, 
+    block-height: uint, 
+    details: (optional { expires-at: uint, target-user: (optional principal) })
+  }
+)
 
 (map-set role-permissions ROLE_ADMIN { can-assign-roles: true, can-revoke-roles: true, can-view-users: true, can-moderate: true })
 (map-set role-permissions ROLE_MODERATOR { can-assign-roles: false, can-revoke-roles: false, can-view-users: true, can-moderate: true })
@@ -81,6 +101,23 @@
   )
 )
 
+(define-private (log-role-action (user principal) (role uint) (action (string-ascii 15)) (details (optional { expires-at: uint, target-user: (optional principal) })))
+  (let ((current-id (var-get history-counter)))
+    (map-set role-history current-id
+      {
+        user: user,
+        role: role,
+        action: action,
+        performed-by: tx-sender,
+        block-height: stacks-block-height,
+        details: details
+      }
+    )
+    (var-set history-counter (+ current-id u1))
+    true
+  )
+)
+
 (define-public (assign-role (user principal) (role uint) (duration uint))
   (let ((current-block stacks-block-height)
         (expires-at (+ current-block duration)))
@@ -94,6 +131,7 @@
       { assigned-at: current-block, expires-at: expires-at, assigned-by: tx-sender }
     )
     (var-set total-active-roles (+ (var-get total-active-roles) u1))
+    (log-role-action user role ACTION_ASSIGNED (some { expires-at: expires-at, target-user: none }))
     (ok true)
   )
 )
@@ -106,6 +144,7 @@
     
     (map-delete user-roles { user: user, role: role })
     (var-set total-active-roles (- (var-get total-active-roles) u1))
+    (log-role-action user role ACTION_REVOKED none)
     (ok true)
   )
 )
@@ -123,6 +162,7 @@
         { user: user, role: role }
         (merge role-data { expires-at: new-expires-at })
       )
+      (log-role-action user role ACTION_EXTENDED (some { expires-at: new-expires-at, target-user: none }))
       (ok true)
     )
     ERR_ROLE_NOT_FOUND
@@ -136,6 +176,7 @@
       (asserts! (< (get expires-at role-data) stacks-block-height) ERR_ROLE_EXPIRED)
       (map-delete user-roles { user: user, role: role })
       (var-set total-active-roles (- (var-get total-active-roles) u1))
+      (log-role-action user role ACTION_EXPIRED none)
       (ok true)
     )
     ERR_ROLE_NOT_FOUND
@@ -159,6 +200,7 @@
           { user: target-user, role: role }
           { assigned-at: current-block, expires-at: (get expires-at role-data), assigned-by: tx-sender }
         )
+        (log-role-action tx-sender role ACTION_TRANSFERRED (some { expires-at: (get expires-at role-data), target-user: (some target-user) }))
         (ok true)
       )
       ERR_ROLE_NOT_FOUND
@@ -196,11 +238,30 @@
   (var-get total-active-roles)
 )
 
+(define-read-only (get-role-history-entry (history-id uint))
+  (map-get? role-history history-id)
+)
+
+(define-read-only (get-history-range (start-id uint) (end-id uint))
+  (if (and (<= start-id end-id) (<= (- end-id start-id) u20))
+    (ok { start: start-id, end: end-id, total-entries: (var-get history-counter) })
+    ERR_INVALID_HISTORY_LIMIT)
+)
+
+(define-private (min (a uint) (b uint))
+  (if (<= a b) a b)
+)
+
+(define-read-only (get-total-history-entries)
+  (var-get history-counter)
+)
+
 (define-read-only (get-contract-info)
   {
     owner: CONTRACT_OWNER,
     total-active-roles: (var-get total-active-roles),
     current-block: stacks-block-height,
+    total-history-entries: (var-get history-counter),
     role-constants: {
       admin: ROLE_ADMIN,
       moderator: ROLE_MODERATOR,
