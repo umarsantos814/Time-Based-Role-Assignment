@@ -8,6 +8,7 @@
 (define-constant ERR_CANNOT_TRANSFER_TO_SELF (err u106))
 (define-constant ERR_TRANSFER_NOT_ALLOWED (err u107))
 (define-constant ERR_INVALID_HISTORY_LIMIT (err u108))
+(define-constant ERR_SYSTEM_FROZEN (err u109))
 
 (define-constant ROLE_ADMIN u1)
 (define-constant ROLE_MODERATOR u2)
@@ -22,6 +23,8 @@
 (define-constant ACTION_EXTENDED "extended")
 (define-constant ACTION_TRANSFERRED "transferred")
 (define-constant ACTION_EXPIRED "expired")
+(define-constant ACTION_FROZEN "frozen")
+(define-constant ACTION_UNFROZEN "unfrozen")
 
 (define-map user-roles
   { user: principal, role: uint }
@@ -35,6 +38,9 @@
 
 (define-data-var total-active-roles uint u0)
 (define-data-var history-counter uint u0)
+(define-data-var system-frozen bool false)
+(define-data-var freeze-initiated-by (optional principal) none)
+(define-data-var freeze-initiated-at (optional uint) none)
 
 (define-map role-history
   uint
@@ -65,6 +71,10 @@
     role-data (>= (get expires-at role-data) stacks-block-height)
     false
   )
+)
+
+(define-private (is-system-frozen)
+  (var-get system-frozen)
 )
 
 (define-private (has-permission (user principal) (permission (string-ascii 20)))
@@ -121,6 +131,7 @@
 (define-public (assign-role (user principal) (role uint) (duration uint))
   (let ((current-block stacks-block-height)
         (expires-at (+ current-block duration)))
+    (asserts! (not (is-system-frozen)) ERR_SYSTEM_FROZEN)
     (asserts! (has-permission tx-sender "assign") ERR_UNAUTHORIZED)
     (asserts! (is-valid-role role) ERR_INVALID_ROLE)
     (asserts! (and (>= duration MIN_DURATION) (<= duration MAX_DURATION)) ERR_INVALID_DURATION)
@@ -138,6 +149,7 @@
 
 (define-public (revoke-role (user principal) (role uint))
   (begin
+    (asserts! (not (is-system-frozen)) ERR_SYSTEM_FROZEN)
     (asserts! (has-permission tx-sender "revoke") ERR_UNAUTHORIZED)
     (asserts! (is-valid-role role) ERR_INVALID_ROLE)
     (asserts! (is-some (map-get? user-roles { user: user, role: role })) ERR_ROLE_NOT_FOUND)
@@ -153,6 +165,7 @@
   (match (map-get? user-roles { user: user, role: role })
     role-data
     (let ((new-expires-at (+ (get expires-at role-data) additional-duration)))
+      (asserts! (not (is-system-frozen)) ERR_SYSTEM_FROZEN)
       (asserts! (has-permission tx-sender "assign") ERR_UNAUTHORIZED)
       (asserts! (is-valid-role role) ERR_INVALID_ROLE)
       (asserts! (and (>= additional-duration MIN_DURATION) (<= additional-duration MAX_DURATION)) ERR_INVALID_DURATION)
@@ -188,6 +201,7 @@
     (match (map-get? user-roles { user: tx-sender, role: role })
       role-data
       (begin
+        (asserts! (not (is-system-frozen)) ERR_SYSTEM_FROZEN)
         (asserts! (not (is-eq tx-sender target-user)) ERR_CANNOT_TRANSFER_TO_SELF)
         (asserts! (is-valid-role role) ERR_INVALID_ROLE)
         (asserts! (>= (get expires-at role-data) current-block) ERR_ROLE_EXPIRED)
@@ -205,6 +219,33 @@
       )
       ERR_ROLE_NOT_FOUND
     )
+  )
+)
+
+(define-public (emergency-freeze-system)
+  (begin
+    (asserts! (or (is-eq tx-sender CONTRACT_OWNER) 
+                  (is-role-active tx-sender ROLE_ADMIN)) ERR_UNAUTHORIZED)
+    (asserts! (not (is-system-frozen)) ERR_SYSTEM_FROZEN)
+    
+    (var-set system-frozen true)
+    (var-set freeze-initiated-by (some tx-sender))
+    (var-set freeze-initiated-at (some stacks-block-height))
+    (log-role-action tx-sender u0 ACTION_FROZEN none)
+    (ok true)
+  )
+)
+
+(define-public (emergency-unfreeze-system)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (is-system-frozen) ERR_SYSTEM_FROZEN)
+    
+    (var-set system-frozen false)
+    (var-set freeze-initiated-by none)
+    (var-set freeze-initiated-at none)
+    (log-role-action tx-sender u0 ACTION_UNFROZEN none)
+    (ok true)
   )
 )
 
@@ -256,12 +297,26 @@
   (var-get history-counter)
 )
 
+(define-read-only (is-system-frozen-status)
+  (var-get system-frozen)
+)
+
+(define-read-only (get-freeze-info)
+  {
+    frozen: (var-get system-frozen),
+    initiated-by: (var-get freeze-initiated-by),
+    initiated-at: (var-get freeze-initiated-at)
+  }
+)
+
 (define-read-only (get-contract-info)
   {
     owner: CONTRACT_OWNER,
     total-active-roles: (var-get total-active-roles),
     current-block: stacks-block-height,
     total-history-entries: (var-get history-counter),
+    system-frozen: (var-get system-frozen),
+    freeze-info: (get-freeze-info),
     role-constants: {
       admin: ROLE_ADMIN,
       moderator: ROLE_MODERATOR,
