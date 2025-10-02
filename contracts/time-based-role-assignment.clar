@@ -9,6 +9,10 @@
 (define-constant ERR_TRANSFER_NOT_ALLOWED (err u107))
 (define-constant ERR_INVALID_HISTORY_LIMIT (err u108))
 (define-constant ERR_SYSTEM_FROZEN (err u109))
+(define-constant ERR_SCHEDULED_ROLE_EXISTS (err u110))
+(define-constant ERR_SCHEDULED_ROLE_NOT_FOUND (err u111))
+(define-constant ERR_ACTIVATION_BLOCK_PASSED (err u112))
+(define-constant ERR_ACTIVATION_NOT_READY (err u113))
 
 (define-constant ROLE_ADMIN u1)
 (define-constant ROLE_MODERATOR u2)
@@ -25,6 +29,9 @@
 (define-constant ACTION_EXPIRED "expired")
 (define-constant ACTION_FROZEN "frozen")
 (define-constant ACTION_UNFROZEN "unfrozen")
+(define-constant ACTION_SCHEDULED "scheduled")
+(define-constant ACTION_ACTIVATED "activated")
+(define-constant ACTION_CANCELLED "cancelled")
 
 (define-map user-roles
   { user: principal, role: uint }
@@ -41,6 +48,17 @@
 (define-data-var system-frozen bool false)
 (define-data-var freeze-initiated-by (optional principal) none)
 (define-data-var freeze-initiated-at (optional uint) none)
+(define-data-var scheduled-roles-counter uint u0)
+
+(define-map scheduled-roles
+  { user: principal, role: uint }
+  { 
+    activation-block: uint, 
+    duration: uint, 
+    scheduled-by: principal, 
+    scheduled-at: uint 
+  }
+)
 
 (define-map role-history
   uint
@@ -249,6 +267,69 @@
   )
 )
 
+(define-public (schedule-role (user principal) (role uint) (activation-block uint) (duration uint))
+  (begin
+    (asserts! (not (is-system-frozen)) ERR_SYSTEM_FROZEN)
+    (asserts! (has-permission tx-sender "assign") ERR_UNAUTHORIZED)
+    (asserts! (is-valid-role role) ERR_INVALID_ROLE)
+    (asserts! (and (>= duration MIN_DURATION) (<= duration MAX_DURATION)) ERR_INVALID_DURATION)
+    (asserts! (> activation-block stacks-block-height) ERR_ACTIVATION_BLOCK_PASSED)
+    (asserts! (not (is-role-active user role)) ERR_ALREADY_HAS_ROLE)
+    (asserts! (is-none (map-get? scheduled-roles { user: user, role: role })) ERR_SCHEDULED_ROLE_EXISTS)
+    
+    (map-set scheduled-roles
+      { user: user, role: role }
+      { 
+        activation-block: activation-block, 
+        duration: duration, 
+        scheduled-by: tx-sender, 
+        scheduled-at: stacks-block-height 
+      }
+    )
+    (var-set scheduled-roles-counter (+ (var-get scheduled-roles-counter) u1))
+    (log-role-action user role ACTION_SCHEDULED (some { expires-at: (+ activation-block duration), target-user: none }))
+    (ok true)
+  )
+)
+
+(define-public (activate-scheduled-role (user principal) (role uint))
+  (match (map-get? scheduled-roles { user: user, role: role })
+    scheduled-data
+    (let ((current-block stacks-block-height)
+          (activation-block (get activation-block scheduled-data))
+          (duration (get duration scheduled-data))
+          (expires-at (+ activation-block duration)))
+      (asserts! (>= current-block activation-block) ERR_ACTIVATION_NOT_READY)
+      (asserts! (not (is-role-active user role)) ERR_ALREADY_HAS_ROLE)
+      
+      (map-delete scheduled-roles { user: user, role: role })
+      (var-set scheduled-roles-counter (- (var-get scheduled-roles-counter) u1))
+      
+      (map-set user-roles
+        { user: user, role: role }
+        { assigned-at: current-block, expires-at: expires-at, assigned-by: (get scheduled-by scheduled-data) }
+      )
+      (var-set total-active-roles (+ (var-get total-active-roles) u1))
+      (log-role-action user role ACTION_ACTIVATED (some { expires-at: expires-at, target-user: none }))
+      (ok true)
+    )
+    ERR_SCHEDULED_ROLE_NOT_FOUND
+  )
+)
+
+(define-public (cancel-scheduled-role (user principal) (role uint))
+  (begin
+    (asserts! (has-permission tx-sender "revoke") ERR_UNAUTHORIZED)
+    (asserts! (is-valid-role role) ERR_INVALID_ROLE)
+    (asserts! (is-some (map-get? scheduled-roles { user: user, role: role })) ERR_SCHEDULED_ROLE_NOT_FOUND)
+    
+    (map-delete scheduled-roles { user: user, role: role })
+    (var-set scheduled-roles-counter (- (var-get scheduled-roles-counter) u1))
+    (log-role-action user role ACTION_CANCELLED none)
+    (ok true)
+  )
+)
+
 (define-read-only (get-user-role (user principal) (role uint))
   (map-get? user-roles { user: user, role: role })
 )
@@ -309,10 +390,26 @@
   }
 )
 
+(define-read-only (get-scheduled-role (user principal) (role uint))
+  (map-get? scheduled-roles { user: user, role: role })
+)
+
+(define-read-only (is-role-ready-for-activation (user principal) (role uint))
+  (match (map-get? scheduled-roles { user: user, role: role })
+    scheduled-data (>= stacks-block-height (get activation-block scheduled-data))
+    false
+  )
+)
+
+(define-read-only (get-total-scheduled-roles)
+  (var-get scheduled-roles-counter)
+)
+
 (define-read-only (get-contract-info)
   {
     owner: CONTRACT_OWNER,
     total-active-roles: (var-get total-active-roles),
+    total-scheduled-roles: (var-get scheduled-roles-counter),
     current-block: stacks-block-height,
     total-history-entries: (var-get history-counter),
     system-frozen: (var-get system-frozen),
