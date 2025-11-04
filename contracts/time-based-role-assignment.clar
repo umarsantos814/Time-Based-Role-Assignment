@@ -1,4 +1,4 @@
-(define-constant CONTRACT_OWNER tx-sender)
+(define-constant CONTRACT_OWNER 'ST000000000000000000002AMW42H)
 (define-constant ERR_UNAUTHORIZED (err u100))
 (define-constant ERR_ROLE_NOT_FOUND (err u101))
 (define-constant ERR_ROLE_EXPIRED (err u102))
@@ -420,5 +420,14 @@
       member: ROLE_MEMBER,
       viewer: ROLE_VIEWER
     }
+  }
+)
+
+(define-read-only (get-user-active-roles (user principal))
+  {
+    admin: (is-role-active user ROLE_ADMIN),
+    moderator: (is-role-active user ROLE_MODERATOR),
+    member: (is-role-active user ROLE_MEMBER),
+    viewer: (is-role-active user ROLE_VIEWER)
   }
 )
